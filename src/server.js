@@ -7,6 +7,7 @@ import { tinyRateLimit } from "./middleware/rateLimit.js";
 import chatRoutes from "./routes/chat.js";
 import quizRoutes from "./routes/quiz.js";
 import marketRoutes from "./routes/market.js";
+import pulseRoutes from "./routes/pulse.js"; // ⬅️ Tambahan: SSE + webhook PulseScout
 
 const app = express();
 
@@ -16,12 +17,15 @@ app.use(buildCors());
 app.use(express.json({ limit: "1mb" }));
 app.use(tinyRateLimit({ windowMs: 10_000, max: 40 }));
 
+// health & root
 app.get("/", (_req, res) => res.json({ ok: true, name: "Kira Backend", version: "1.0.0" }));
 app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
-app.use("/api", chatRoutes);
-app.use("/api", quizRoutes);
-app.use("/api", marketRoutes);
+// routes
+app.use("/api", chatRoutes);      // POST /api/chat
+app.use("/api", quizRoutes);      // POST /api/quiz
+app.use("/api", marketRoutes);    // (punyamu)
+app.use("/api/pulse", pulseRoutes); // ⬅️ Baru: /api/pulse/stream, /api/pulse/webhook/:secret, /api/pulse/emit
 
 // 404
 app.use((req, res) => res.status(404).json({ error: "not_found", path: req.path }));
