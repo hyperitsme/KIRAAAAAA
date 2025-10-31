@@ -1,15 +1,15 @@
-const cors = require('cors');
+import cors from 'cors';
 
 function norm(u){
   try {
     const x = new URL(u);
     return `${x.protocol}//${x.host}`;
   } catch {
-    return (u||'').replace(/\/+$/,'');
+    return (u || '').replace(/\/+$/,'');
   }
 }
 
-function buildCors(){
+export function buildCors(){
   const raw = (process.env.CORS_ORIGINS || '')
     .split(',')
     .map(s => s.trim())
@@ -20,7 +20,6 @@ function buildCors(){
     console.warn('[CORS] No CORS_ORIGINS set → allowing all (dev mode)');
     return cors({ origin: true, credentials: true });
   }
-
   return cors({
     credentials: true,
     origin: (origin, cb) => {
@@ -31,5 +30,3 @@ function buildCors(){
     }
   });
 }
-
-module.exports = { buildCors };
