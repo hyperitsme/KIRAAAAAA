@@ -3,58 +3,88 @@ import { Router } from "express";
 
 const router = Router();
 
-function num(x, d = 0) { const n = Number(x); return Number.isFinite(n) ? n : d; }
-async function fetchWithTimeout(url, ms = 8000, init = {}) {
-  const ctrl = new AbortController();
-  const id = setTimeout(() => ctrl.abort(), ms);
-  try { return await fetch(url, { ...init, signal: ctrl.signal }); }
-  finally { clearTimeout(id); }
+// Peta simbol → id CoinGecko (bisa tambah sesuai kebutuhan)
+const COINGECKO_IDS = {
+  BTC: "bitcoin",
+  ETH: "ethereum",
+  SOL: "solana",
+  BNB: "binancecoin",
+  AVAX: "avalanche-2",
+  MATIC: "matic-network",
+  DOGE: "dogecoin",
+};
+
+const VS = "usd";
+
+async function fetchSimple(ids) {
+  const url =
+    "https://api.coingecko.com/api/v3/simple/price?" +
+    new URLSearchParams({ ids: ids.join(","), vs_currencies: VS }).toString();
+
+  // Node 18+ punya fetch bawaan
+  const r = await fetch(url, { headers: { accept: "application/json" } });
+  if (!r.ok) throw new Error(`coingecko ${r.status}`);
+  return r.json();
 }
 
-async function binance(symbol = "SOLUSDT") {
-  const r = await fetchWithTimeout(
-    `https://api.binance.com/api/v3/ticker/24hr?symbol=${encodeURIComponent(symbol)}`,
-    8000
-  );
-  if (!r.ok) throw new Error("binance_" + r.status);
-  const j = await r.json();
-  return {
-    ok: true, source: "binance", symbol: j.symbol || symbol,
-    price: num(j.lastPrice), high24h: num(j.highPrice), low24h: num(j.lowPrice),
-    change24h: num(j.priceChangePercent) / 100, volume24h: num(j.volume),
-    ts: new Date().toISOString(),
-  };
-}
+/**
+ * GET /api/price/:symbol
+ * contoh: /api/price/SOL  → { symbol:"SOL", price: 178.23, source:"coingecko" }
+ */
+router.get("/price/:symbol", async (req, res) => {
+  try {
+    const sym = String(req.params.symbol || "").toUpperCase();
+    const id = COINGECKO_IDS[sym];
+    if (!id) return res.status(400).json({ error: "unsupported_symbol", sym });
 
-const CG_IDS = { SOLUSDT: "solana", BTCUSDT: "bitcoin", ETHUSDT: "ethereum" };
-async function coingecko(symbol = "SOLUSDT") {
-  const id = CG_IDS[symbol] || "solana";
-  const u = `https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd&include_24hr_high=true&include_24hr_low=true&include_24hr_change=true`;
-  const r = await fetchWithTimeout(u, 8000, { headers: { Accept: "application/json" } });
-  if (!r.ok) throw new Error("coingecko_" + r.status);
-  const j = await r.json();
-  const row = j[id] || {};
-  return {
-    ok: true, source: "coingecko", symbol,
-    price: num(row.usd), high24h: num(row.usd_24h_high), low24h: num(row.usd_24h_low),
-    change24h: num(row.usd_24h_change) / 100, ts: new Date().toISOString(),
-  };
-}
+    const data = await fetchSimple([id]);
+    const price = data?.[id]?.[VS];
+    if (price == null) return res.status(502).json({ error: "no_price" });
 
-async function snapshot(symbol = "SOLUSDT") {
-  try { return await binance(symbol); } catch { return await coingecko(symbol); }
-}
-
-router.get("/price", async (req, res) => {
-  const symbol = (req.query.symbol || "SOLUSDT").toString().toUpperCase();
-  try { res.json(await snapshot(symbol)); }
-  catch (e) { res.status(502).json({ ok: false, error: "price_unavailable", detail: e.message, symbol }); }
+    res.json({ symbol: sym, price, vs: VS, source: "coingecko" });
+  } catch (e) {
+    res.status(500).json({ error: "price_failed", detail: String(e.message || e) });
+  }
 });
 
-router.get("/price/:symbol", async (req, res) => {
-  const symbol = (req.params.symbol || "SOLUSDT").toString().toUpperCase();
-  try { res.json(await snapshot(symbol)); }
-  catch (e) { res.status(502).json({ ok: false, error: "price_unavailable", detail: e.message, symbol }); }
+/**
+ * GET /api/price/simple?symbols=SOL,ETH,BTC
+ * contoh: /api/price/simple?symbols=SOL,ETH
+ * output: { SOL: 178.23, ETH: 3540.12 }
+ */
+router.get("/price/simple", async (req, res) => {
+  try {
+    const list =
+      String(req.query.symbols || "")
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean) || [];
+
+    if (!list.length) return res.status(400).json({ error: "symbols_required" });
+
+    const ids = [];
+    const mapBack = {};
+    for (const sym of list) {
+      const id = COINGECKO_IDS[sym];
+      if (id) {
+        ids.push(id);
+        mapBack[id] = sym;
+      }
+    }
+    if (!ids.length) return res.status(400).json({ error: "no_supported_symbols" });
+
+    const data = await fetchSimple(ids);
+
+    const out = {};
+    for (const id of ids) {
+      const sym = mapBack[id];
+      const p = data?.[id]?.[VS];
+      if (p != null) out[sym] = p;
+    }
+    res.json(out);
+  } catch (e) {
+    res.status(500).json({ error: "price_failed", detail: String(e.message || e) });
+  }
 });
 
 export default router;
