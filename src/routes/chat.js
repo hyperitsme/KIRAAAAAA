@@ -26,13 +26,10 @@ async function fetchSpotUSD(symbol) {
   return (typeof p === "number") ? p : null;
 }
 
-// Deteksi simbol sederhana dari input user
 function detectSymbol(text = "") {
   const U = text.toUpperCase();
-  // cari SOL/USDT, BTCUSDT, ETH-PERP, dll
   const m1 = U.match(/\b([A-Z]{3,5})\s*\/?\s*(USDT|USD|PERP)\b/);
   if (m1 && SYM_MAP[m1[1]]) return m1[1];
-  // fallback: sebut simbol tunggal
   for (const s of Object.keys(SYM_MAP)) {
     if (U.includes(` ${s} `) || U.startsWith(`${s} `) || U.endsWith(` ${s}`)) return s;
   }
@@ -47,45 +44,60 @@ function qaSystem() {
     "Style: concise, direct, professional. Use bullet points. Avoid fluff.",
     "Always include risk controls (entry idea, stop, invalidation) if user asks for strategy.",
     "Never invent exact numbers you don't know; prefer ranges if data is missing.",
+    "Do NOT output code fences or JSON. Reply in plain text only.",
   ].join("\n");
 }
 
 function chartSageSystem({ symbol, spot }) {
   const priceLine = spot
-    ? `Current spot (${symbol}/USD): $${spot.toFixed(2)} (CoinGecko, UTC).`
+    ? `Current spot (${symbol || "N/A"}/USD): $${spot.toFixed(2)} (CoinGecko, UTC).`
     : `Current spot: unavailable. Do NOT invent exact price. Use relative wording (e.g., 'near recent support/resistance').`;
 
   return [
     "You are ChartSage — an AI Technical Analyst.",
     priceLine,
-    "Your job: multi-timeframe reasoning (15m / 1H / 4H), pattern detection hints, ATR/volume context, and human-grade narrative.",
-    "STRICT TEMPLATE. Output must be professional and compact. Use ONLY the following sections in order:",
-    "1) **Overview** — 1–2 lines on current structure and volatility.",
-    "2) **Multi-TF View** — bullets for 15m, 1H, 4H (trend, structure).",
-    "3) **Key Levels** — ONLY if supported by context. Prefer relative phrasing if unsure; never hallucinate exact levels.",
-    "4) **Trade Plan (if-then)** — entry triggers (confirmation), targets, partials, and trailing logic.",
-    "5) **Risk & Invalidation** — stop criteria and what invalidates the idea.",
+    "Your job: multi-timeframe reasoning (15m / 1H / 4H), pattern hints, ATR/volume context, human-grade narrative.",
+    "",
+    "STRICT OUTPUT FORMAT. Reply in plain text (no code fences, no JSON). Use these sections exactly:",
+    "1) **Overview** — 1–2 lines on current structure/volatility.",
+    "2) **Multi-TF View** — bullets for 15m, 1H, 4H (trend/structure/flow).",
+    "3) **Key Levels** — only if supported by context. If unsure, use relative phrasing; never hallucinate exact levels.",
+    "4) **Trade Plan (if-then)** — entry triggers (confirmation), targets/partials, trailing logic.",
+    "5) **Risk & Invalidation** — clear stop/invalidation criteria.",
     "6) **Checklist** — 3–5 quick checks (volume/ATR/liquidity sweep/break-retest).",
     "",
     "Hard rules:",
-    "- Do not claim real-time market data beyond the provided spot. If spot is missing, avoid exact numbers.",
-    "- Be actionable but cautious: emphasize confirmation over prediction.",
-    "- No emojis, no hype, no filler.",
+    "- Do not claim real-time data beyond the provided spot.",
+    "- Emphasize confirmation over prediction; be actionable but cautious.",
+    "- No emojis / hype / filler. No code blocks. No JSON.",
   ].join("\n");
 }
 
 function pulseScoutSystem() {
   return [
     "You are PulseScout, a precision-first market radar.",
-    "Return succinct insights about flow/alerts if asked directly. Otherwise keep answers short.",
+    "Keep answers short. Do NOT output code fences or JSON unless explicitly requested.",
   ].join("\n");
 }
 
-// Build system by module
 function buildSystem(module, ctx) {
   if (module === "chartsage") return chartSageSystem(ctx || {});
   if (module === "pulsescout") return pulseScoutSystem();
   return qaSystem();
+}
+
+// Sanitizer: buang code fences & blok JSON yg nyasar
+function cleanReply(s = "") {
+  // remove fenced code blocks ```...```
+  s = s.replace(/```[\s\S]*?```/g, "");
+  // remove lone JSON arrays/objects accidentally appended
+  const fenceIdx = s.indexOf("\n{");
+  if (fenceIdx > -1) s = s.slice(0, fenceIdx);
+  const arrIdx = s.indexOf("\n[");
+  if (arrIdx > -1) s = s.slice(0, arrIdx);
+  // tidy blank lines
+  s = s.replace(/\n{3,}/g, "\n\n").trim();
+  return s;
 }
 
 const router = Router();
@@ -93,16 +105,14 @@ const router = Router();
 /**
  * POST /api/chat
  * body: { message, module, wallet, provider }
- * Enhancements:
- * - For chartsage: detect symbol (e.g., SOL) and fetch spot; inject into system.
- * - Enforce professional template via system prompt.
+ * - chartsage: deteksi simbol + fetch spot; injeksikan ke system prompt
+ * - paksa format narasi profesional & bersihkan code fences
  */
 router.post("/chat", async (req, res) => {
   try {
     const { message, module, wallet, provider } = req.body || {};
     if (!message) return res.status(400).json({ error: "Missing 'message'." });
 
-    // Context for chartsage
     let symbol = null;
     let spot = null;
 
@@ -114,8 +124,6 @@ router.post("/chat", async (req, res) => {
     }
 
     const system = buildSystem(module, { symbol, spot });
-
-    // Compose user message with minimal metadata
     const user = [
       symbol ? `Symbol: ${symbol}/USD` : "Symbol: (not detected)",
       wallet ? `Wallet: ${wallet} via ${provider || "-"}` : "Wallet: -",
@@ -123,12 +131,10 @@ router.post("/chat", async (req, res) => {
     ].join("\n");
 
     const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
-    const reply = await generateText({ model, system, user });
+    const raw = await generateText({ model, system, user });
+    const reply = cleanReply(raw);
 
-    res.json({
-      reply,
-      meta: { module, symbol, spot },
-    });
+    res.json({ reply, meta: { module, symbol, spot } });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "chat_failed", detail: err.message });
