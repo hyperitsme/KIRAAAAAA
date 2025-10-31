@@ -1,16 +1,15 @@
-const express = require('express');
-const { addClient, send, broadcast, toAlert } = require('../pulse/hub');
+import { Router, json } from 'express';
+import { addClient, send, broadcast, toAlert } from '../pulse/hub.js';
 
-const router = express.Router();
+const router = Router();
 
 function checkSecret(req){
   const secret = process.env.PULSE_SECRET || '';
   return secret && (req.params.secret === secret || req.query.secret === secret || req.body?.secret === secret);
 }
 
-// GET /api/pulse/stream?f=<urlencoded JSON filters>
+// GET /api/pulse/stream?f=<urlencoded JSON>
 router.get('/stream', (req, res) => {
-  // SSE headers
   res.set({
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -19,34 +18,28 @@ router.get('/stream', (req, res) => {
   res.flushHeaders?.();
 
   addClient(res);
-
-  // greeting + ping
   send(res, { ok: true, hello: 'PulseScout SSE connected' });
   const keep = setInterval(() => { try{ res.write('event: ping\ndata: {}\n\n'); }catch{} }, 25000);
   res.on('close', () => clearInterval(keep));
 });
 
 // POST /api/pulse/webhook/:secret
-router.post('/webhook/:secret', express.json({limit:'1mb'}), (req, res) => {
+router.post('/webhook/:secret', json({limit:'1mb'}), (req, res) => {
   if (!checkSecret(req)) return res.status(401).json({ error: 'invalid secret' });
 
-  // Bisa menerima array atau single object
   const body = req.body;
   const items = Array.isArray(body) ? body : [body];
-
   for (const it of items) {
-    const alert = toAlert(it);
-    broadcast(alert);
+    broadcast(toAlert(it));
   }
   res.json({ ok: true, received: items.length });
 });
 
-// Dev/test: POST /api/pulse/emit { secret, payload }
-router.post('/emit', express.json(), (req, res) => {
+// Dev/test
+router.post('/emit', json(), (req, res) => {
   if (!checkSecret(req)) return res.status(401).json({ error: 'invalid secret' });
-  const alert = toAlert(req.body?.payload || {});
-  broadcast(alert);
+  broadcast(toAlert(req.body?.payload || {}));
   res.json({ ok: true });
 });
 
-module.exports = router;
+export default router;
