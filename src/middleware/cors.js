@@ -1,22 +1,35 @@
-import cors from "cors";
+const cors = require('cors');
 
-export function buildCors() {
-  const list = (process.env.CORS_ORIGINS || "")
-    .split(",")
+function norm(u){
+  try {
+    const x = new URL(u);
+    return `${x.protocol}//${x.host}`;
+  } catch {
+    return (u||'').replace(/\/+$/,'');
+  }
+}
+
+function buildCors(){
+  const raw = (process.env.CORS_ORIGINS || '')
+    .split(',')
     .map(s => s.trim())
     .filter(Boolean);
+  const allow = new Set(raw.map(norm));
 
-  if (list.length === 0) {
-    // default: allow local & anything (dev)
+  if (allow.size === 0) {
+    console.warn('[CORS] No CORS_ORIGINS set → allowing all (dev mode)');
     return cors({ origin: true, credentials: true });
   }
+
   return cors({
+    credentials: true,
     origin: (origin, cb) => {
       if (!origin) return cb(null, true);
-      if (list.includes(origin)) return cb(null, true);
-      cb(new Error("Not allowed by CORS: " + origin));
-    },
-    credentials: true
+      const o = norm(origin);
+      if (allow.has(o)) return cb(null, true);
+      cb(new Error(`[CORS] Blocked origin: ${origin}`));
+    }
   });
 }
 
+module.exports = { buildCors };
