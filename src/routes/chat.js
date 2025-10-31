@@ -2,164 +2,133 @@
 import { Router } from "express";
 import { generateText } from "../lib/openai.js";
 
-const router = Router();
+// ===== Helpers: symbol map + price fetch (CoinGecko) =====
+const SYM_MAP = {
+  BTC: "bitcoin",
+  ETH: "ethereum",
+  SOL: "solana",
+  BNB: "binancecoin",
+  AVAX: "avalanche-2",
+  MATIC: "matic-network",
+  XRP: "ripple",
+  DOGE: "dogecoin",
+};
 
-/* -------------------- LIVE PRICE HELPERS (inline, no extra imports) -------------------- */
+async function fetchSpotUSD(symbol) {
+  const id = SYM_MAP[symbol?.toUpperCase?.()] || null;
+  if (!id) return null;
+  const url = "https://api.coingecko.com/api/v3/simple/price?" +
+    new URLSearchParams({ ids: id, vs_currencies: "usd" }).toString();
+  const r = await fetch(url, { headers: { accept: "application/json" } });
+  if (!r.ok) return null;
+  const j = await r.json();
+  const p = j?.[id]?.usd;
+  return (typeof p === "number") ? p : null;
+}
 
-const CACHE = new Map(); // key -> {ts,data}
-const TTL = 10_000; // 10s
-
-function cacheGet(key) {
-  const hit = CACHE.get(key);
-  if (hit && Date.now() - hit.ts < TTL) return hit.data;
+// Deteksi simbol sederhana dari input user
+function detectSymbol(text = "") {
+  const U = text.toUpperCase();
+  // cari SOL/USDT, BTCUSDT, ETH-PERP, dll
+  const m1 = U.match(/\b([A-Z]{3,5})\s*\/?\s*(USDT|USD|PERP)\b/);
+  if (m1 && SYM_MAP[m1[1]]) return m1[1];
+  // fallback: sebut simbol tunggal
+  for (const s of Object.keys(SYM_MAP)) {
+    if (U.includes(` ${s} `) || U.startsWith(`${s} `) || U.endsWith(` ${s}`)) return s;
+  }
   return null;
 }
-function cacheSet(key, data) {
-  CACHE.set(key, { ts: Date.now(), data });
-}
 
-function asNumber(x, def = 0) {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : def;
-}
-
-// Abortable fetch (WHATWG fetch tak punya option timeout)
-async function fetchWithTimeout(url, ms = 8000, init = {}) {
-  const c = new AbortController();
-  const id = setTimeout(() => c.abort(), ms);
-  try {
-    const r = await fetch(url, { ...init, signal: c.signal });
-    return r;
-  } finally {
-    clearTimeout(id);
-  }
-}
-
-async function binanceSnapshot(symbol = "SOLUSDT") {
-  const u = `https://api.binance.com/api/v3/ticker/24hr?symbol=${encodeURIComponent(symbol)}`;
-  const r = await fetchWithTimeout(u);
-  if (!r.ok) throw new Error("binance_http_" + r.status);
-  const j = await r.json();
-  return {
-    ok: true,
-    source: "binance",
-    symbol: j.symbol || symbol,
-    price: asNumber(j.lastPrice),
-    change24h: asNumber(j.priceChangePercent) / 100,
-    high24h: asNumber(j.highPrice),
-    low24h: asNumber(j.lowPrice),
-    volume24h: asNumber(j.volume),
-    ts: new Date().toISOString(),
-  };
-}
-
-const CG_IDS = { SOLUSDT: "solana", BTCUSDT: "bitcoin", ETHUSDT: "ethereum" };
-async function coingeckoSnapshot(symbol = "SOLUSDT") {
-  const id = CG_IDS[symbol] || "solana";
-  const u =
-    `https://api.coingecko.com/api/v3/simple/price?ids=${id}` +
-    `&vs_currencies=usd&include_24hr_high=true&include_24hr_low=true&include_24hr_change=true`;
-  const r = await fetchWithTimeout(u, 8000, { headers: { Accept: "application/json" } });
-  if (!r.ok) throw new Error("coingecko_http_" + r.status);
-  const j = await r.json();
-  const row = j[id] || {};
-  return {
-    ok: true,
-    source: "coingecko",
-    symbol,
-    price: asNumber(row.usd),
-    change24h: asNumber(row.usd_24h_change) / 100,
-    high24h: asNumber(row.usd_24h_high),
-    low24h: asNumber(row.usd_24h_low),
-    volume24h: undefined,
-    ts: new Date().toISOString(),
-  };
-}
-
-async function getSnapshot(symbol = "SOLUSDT") {
-  const key = "snap:" + symbol;
-  const hit = cacheGet(key);
-  if (hit) return hit;
-  try {
-    const a = await binanceSnapshot(symbol);
-    cacheSet(key, a);
-    return a;
-  } catch {
-    const b = await coingeckoSnapshot(symbol);
-    cacheSet(key, b);
-    return b;
-  }
-}
-
-function formatSnapshot(s) {
-  if (!s) return "market_snapshot: unavailable";
+// ===== System prompts =====
+function qaSystem() {
   return [
-    "market_snapshot:",
-    "{",
-    `  symbol: "${s.symbol}",`,
-    `  source: "${s.source}",`,
-    `  ts_iso: "${s.ts}",`,
-    `  price_usd: ${s.price},`,
-    `  change_24h: ${s.change24h},`,
-    `  high_24h: ${s.high24h},`,
-    `  low_24h: ${s.low24h}`,
-    "}",
+    "You are Kira AI — TradeGPT Companion.",
+    "Audience: retail-to-pro crypto/stock traders.",
+    "Style: concise, direct, professional. Use bullet points. Avoid fluff.",
+    "Always include risk controls (entry idea, stop, invalidation) if user asks for strategy.",
+    "Never invent exact numbers you don't know; prefer ranges if data is missing.",
   ].join("\n");
 }
 
-/* -------------------- SYMBOL DETECTOR -------------------- */
+function chartSageSystem({ symbol, spot }) {
+  const priceLine = spot
+    ? `Current spot (${symbol}/USD): $${spot.toFixed(2)} (CoinGecko, UTC).`
+    : `Current spot: unavailable. Do NOT invent exact price. Use relative wording (e.g., 'near recent support/resistance').`;
 
-function detectSymbol(text = "") {
-  const t = (text || "").toUpperCase();
-  if (/\bSOL\b|SOL\/?USDT|\bSOL-?PERP\b/.test(t)) return "SOLUSDT";
-  if (/\bBTC\b|BTC\/?USDT|\bBTC-?PERP\b/.test(t)) return "BTCUSDT";
-  if (/\bETH\b|ETH\/?USDT|\bETH-?PERP\b/.test(t)) return "ETHUSDT";
-  return "SOLUSDT"; // default
+  return [
+    "You are ChartSage — an AI Technical Analyst.",
+    priceLine,
+    "Your job: multi-timeframe reasoning (15m / 1H / 4H), pattern detection hints, ATR/volume context, and human-grade narrative.",
+    "STRICT TEMPLATE. Output must be professional and compact. Use ONLY the following sections in order:",
+    "1) **Overview** — 1–2 lines on current structure and volatility.",
+    "2) **Multi-TF View** — bullets for 15m, 1H, 4H (trend, structure).",
+    "3) **Key Levels** — ONLY if supported by context. Prefer relative phrasing if unsure; never hallucinate exact levels.",
+    "4) **Trade Plan (if-then)** — entry triggers (confirmation), targets, partials, and trailing logic.",
+    "5) **Risk & Invalidation** — stop criteria and what invalidates the idea.",
+    "6) **Checklist** — 3–5 quick checks (volume/ATR/liquidity sweep/break-retest).",
+    "",
+    "Hard rules:",
+    "- Do not claim real-time market data beyond the provided spot. If spot is missing, avoid exact numbers.",
+    "- Be actionable but cautious: emphasize confirmation over prediction.",
+    "- No emojis, no hype, no filler.",
+  ].join("\n");
 }
 
-/* -------------------- ROUTE -------------------- */
+function pulseScoutSystem() {
+  return [
+    "You are PulseScout, a precision-first market radar.",
+    "Return succinct insights about flow/alerts if asked directly. Otherwise keep answers short.",
+  ].join("\n");
+}
 
+// Build system by module
+function buildSystem(module, ctx) {
+  if (module === "chartsage") return chartSageSystem(ctx || {});
+  if (module === "pulsescout") return pulseScoutSystem();
+  return qaSystem();
+}
+
+const router = Router();
+
+/**
+ * POST /api/chat
+ * body: { message, module, wallet, provider }
+ * Enhancements:
+ * - For chartsage: detect symbol (e.g., SOL) and fetch spot; inject into system.
+ * - Enforce professional template via system prompt.
+ */
 router.post("/chat", async (req, res) => {
   try {
-    const { message, module, wallet, provider, symbol: symbolFromUI } = req.body || {};
+    const { message, module, wallet, provider } = req.body || {};
     if (!message) return res.status(400).json({ error: "Missing 'message'." });
 
-    const symbol = (symbolFromUI || detectSymbol(message)).toUpperCase();
-    let snap = null;
-    try {
-      snap = await getSnapshot(symbol);
-    } catch {
-      // keep null; prompt will forbid numeric guessing
+    // Context for chartsage
+    let symbol = null;
+    let spot = null;
+
+    if (module === "chartsage") {
+      symbol = detectSymbol(message) || null;
+      if (symbol) {
+        try { spot = await fetchSpotUSD(symbol); } catch { /* ignore */ }
+      }
     }
 
-    const system = [
-      "You are Kira AI — TradeGPT Companion.",
-      "Audience: retail–pro crypto/stock traders.",
-      "Style: concise, actionable; use bullet points for plan/levels; ALWAYS include risk controls (entry, stop, invalidation).",
-      "",
-      "STRICT NUMERIC POLICY:",
-      "- Use ONLY numbers/levels present in the provided market_snapshot.",
-      "- If snapshot is unavailable, DO NOT invent precise prices; answer qualitatively (e.g., 'near recent swing high').",
-      "- Never guess the current price.",
-    ].join("\n");
+    const system = buildSystem(module, { symbol, spot });
 
-    const context = [
-      `module: ${module || "qa"}`,
-      `wallet: ${wallet || "-"} via ${provider || "-"}`,
-      formatSnapshot(snap),
-      "",
-      "task:",
-      "Answer the user's trading question using that snapshot.",
-      "If user requests a plan, include: bias, key levels (from snapshot only), invalidation, risk note.",
-      "Keep it ≤ 10 bullet points.",
+    // Compose user message with minimal metadata
+    const user = [
+      symbol ? `Symbol: ${symbol}/USD` : "Symbol: (not detected)",
+      wallet ? `Wallet: ${wallet} via ${provider || "-"}` : "Wallet: -",
+      `Query: ${message}`,
     ].join("\n");
-
-    const user = `User question:\n${message}`;
 
     const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
-    const reply = await generateText({ model, system, user: context + "\n\n" + user });
+    const reply = await generateText({ model, system, user });
 
-    res.json({ reply, snapshot: snap });
+    res.json({
+      reply,
+      meta: { module, symbol, spot },
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "chat_failed", detail: err.message });
