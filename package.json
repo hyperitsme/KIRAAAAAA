@@ -1,0 +1,19 @@
+{
+  "name": "kira-backend",
+  "version": "1.0.0",
+  "description": "Backend for Kira AI — TradeGPT Companion (Express + OpenAI Responses API)",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "node --env-file=.env src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "helmet": "^7.1.0",
+    "openai": "^4.56.0",
+    "uuid": "^9.0.1"
+  }
+}
